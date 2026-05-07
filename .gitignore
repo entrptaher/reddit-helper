@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build output
+build/
+
+# Plasmo
+.plasmo/
+
+# macOS
+.DS_Store
+
+# TypeScript
+tsconfig.tsbuildinfo
+
+# Env
+.env
+.env.*
+!.env.example
