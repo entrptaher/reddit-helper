@@ -3,6 +3,7 @@ import { loadSettings, saveSettings, toPublicSettings } from "./lib/storage"
 import { normalizeBaseURL, providerEndpoint, STATIC_PROVIDERS } from "./lib/providers"
 import { normalizeExaSearchType } from "./lib/exa"
 import { getDynamicModels, getDynamicProviders } from "./lib/models-cache"
+import { STYLE_KEYS, type StyleKey } from "./lib/styles"
 import { getCached, setCached } from "./lib/cache"
 import { packPrompt, validateExtractedContent } from "./lib/prompt-packer"
 import { checkedFetch, normalizeRuntimeError, RuntimeError, withTimeoutAndRetry } from "./lib/runtime"
@@ -120,6 +121,25 @@ async function fetchRedditJsonContent(subreddit: string, postId: string): Promis
   }
 }
 
+function normalizeRedditJsonResultUrl(rawUrl: string): { url: string; displayUrl?: string } {
+  try {
+    const parsed = new URL(rawUrl)
+    if (!/(^|\.)reddit\.com$/i.test(parsed.hostname)) return { url: rawUrl }
+    if (!parsed.pathname.toLowerCase().endsWith(".json")) return { url: rawUrl }
+
+    const cleanPath = parsed.pathname.replace(/\.json$/i, "")
+    parsed.pathname = cleanPath
+    parsed.search = ""
+    parsed.hash = ""
+    return {
+      url: parsed.toString(),
+      displayUrl: `${parsed.origin}${cleanPath}`,
+    }
+  } catch {
+    return { url: rawUrl.replace(/\.json(?=$|[?#])/i, "") }
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "openOptions") {
     chrome.runtime.openOptionsPage()
@@ -142,6 +162,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "save-exa-search-type") {
     loadSettings()
       .then((settings) => saveSettings({ ...settings, exaSearchType: normalizeExaSearchType(msg.searchType) }))
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }))
+    return true
+  }
+  if (msg?.type === "save-summary-style") {
+    const summaryStyle = STYLE_KEYS.includes(msg.summaryStyle as StyleKey) ? msg.summaryStyle as StyleKey : "summary"
+    loadSettings()
+      .then((settings) => saveSettings({ ...settings, summaryStyle }))
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }))
     return true
@@ -313,14 +341,18 @@ chrome.runtime.onConnect.addListener((port) => {
 
         const data = await r.json()
         const results = Array.isArray(data.results)
-          ? data.results.map((item: any) => ({
-              id: String(item.id ?? item.url ?? ""),
-              title: String(item.title ?? item.url ?? "Untitled result"),
-              url: String(item.url ?? item.id ?? ""),
-              author: item.author ? String(item.author) : undefined,
-              image: item.image ? String(item.image) : undefined,
-              favicon: item.favicon ? String(item.favicon) : undefined,
-            })).filter((item: any) => item.url)
+          ? data.results.map((item: any) => {
+              const normalized = normalizeRedditJsonResultUrl(String(item.url ?? item.id ?? ""))
+              return {
+                id: String(item.id ?? item.url ?? ""),
+                title: String(item.title ?? item.url ?? "Untitled result"),
+                url: normalized.url,
+                displayUrl: normalized.displayUrl,
+                author: item.author ? String(item.author) : undefined,
+                image: item.image ? String(item.image) : undefined,
+                favicon: item.favicon ? String(item.favicon) : undefined,
+              }
+            }).filter((item: any) => item.url)
           : []
 
         port.postMessage({

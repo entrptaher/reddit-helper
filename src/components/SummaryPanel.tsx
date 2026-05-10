@@ -218,6 +218,7 @@ function resultPath(url: string): string {
 
 function RelatedResultRow({ result }: { result: ExaRelatedResult }) {
   const image = result.image || result.favicon
+  const displayUrl = result.displayUrl ?? result.url
 
   return (
     <a className="rds-related__item" href={result.url} target="_blank" rel="noreferrer">
@@ -229,10 +230,10 @@ function RelatedResultRow({ result }: { result: ExaRelatedResult }) {
       <span className="rds-related__content">
         <span className="rds-related__title">{result.title}</span>
         <span className="rds-related__meta">
-          {resultHost(result.url)}
+          {resultHost(displayUrl)}
           {result.author ? ` · ${result.author}` : ""}
         </span>
-        <span className="rds-related__path">{resultPath(result.url)}</span>
+        <span className="rds-related__path">{resultPath(displayUrl)}</span>
       </span>
     </a>
   )

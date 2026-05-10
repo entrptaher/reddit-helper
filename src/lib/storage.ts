@@ -1,5 +1,6 @@
 import type { ProviderDef } from "./providers"
 import { normalizeExaSearchType, type ExaSearchType } from "./exa"
+import { STYLE_KEYS, type StyleKey } from "./styles"
 
 export interface ProviderConfig {
   apiKey?: string
@@ -16,6 +17,8 @@ export interface Settings {
   exaApiKey?: string
   exaSearchType: ExaSearchType
   redditSearchEnabled: boolean
+  summaryStyle: StyleKey
+  allowJsonPages: boolean
   configuredProviderIds?: string[]
 }
 
@@ -30,6 +33,12 @@ const DEFAULTS: Settings = {
   exaEnabled: false,
   exaSearchType: "fast",
   redditSearchEnabled: true,
+  summaryStyle: "summary",
+  allowJsonPages: false,
+}
+
+function normalizeStyleKey(value?: string): StyleKey {
+  return STYLE_KEYS.includes(value as StyleKey) ? value as StyleKey : DEFAULTS.summaryStyle
 }
 
 function normalizeSettings(raw?: Partial<Settings>): Settings {
@@ -62,6 +71,8 @@ function normalizeSettings(raw?: Partial<Settings>): Settings {
     exaEnabled: raw?.exaEnabled ?? Boolean(exaApiKey),
     exaSearchType: normalizeExaSearchType(raw?.exaSearchType),
     redditSearchEnabled: raw?.redditSearchEnabled ?? DEFAULTS.redditSearchEnabled,
+    summaryStyle: normalizeStyleKey(raw?.summaryStyle),
+    allowJsonPages: raw?.allowJsonPages ?? DEFAULTS.allowJsonPages,
     provider: raw?.provider === "custom" ? "custom-legacy" : raw?.provider ?? DEFAULTS.provider,
   }
 }
@@ -116,6 +127,19 @@ export function saveProviderSelection(provider: string, model: string): Promise<
       const err = chrome.runtime.lastError
       if (err || !response?.ok) {
         reject(new Error(err?.message ?? response?.error ?? "Failed to save provider selection"))
+        return
+      }
+      resolve()
+    })
+  })
+}
+
+export function saveSummaryStyle(summaryStyle: StyleKey): Promise<void> {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type: "save-summary-style", summaryStyle }, (response) => {
+      const err = chrome.runtime.lastError
+      if (err || !response?.ok) {
+        reject(new Error(err?.message ?? response?.error ?? "Failed to save summary style"))
         return
       }
       resolve()

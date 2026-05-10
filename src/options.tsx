@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react"
+import React, { useEffect, useMemo, useRef, useState } from "react"
 import "@fontsource/space-grotesk/400.css"
 import "@fontsource/space-grotesk/500.css"
 import "@fontsource/space-grotesk/700.css"
@@ -94,7 +94,7 @@ function ProviderRow({
 
   if (def.id === "gemini-nano") {
     return (
-      <div className="opt-provider">
+      <div className="opt-provider" data-provider-id={def.id}>
         <div className="opt-provider__name">{def.label}</div>
         <p className="opt-provider__note">Built-in — no configuration required.</p>
       </div>
@@ -124,7 +124,7 @@ function ProviderRow({
   }
 
   return (
-    <div className="opt-provider">
+    <div className={`opt-provider ${def.custom ? "opt-provider--custom" : ""}`} data-provider-id={def.id}>
       <div className="opt-provider__header">
         <div className="opt-provider__name">{def.label}</div>
         <div className="opt-provider__actions">
@@ -222,6 +222,7 @@ export default function Options() {
   const [exaTestMsg, setExaTestMsg] = useState("")
   const [redditTestState, setRedditTestState] = useState<TestState>("idle")
   const [redditTestMsg, setRedditTestMsg] = useState("")
+  const scrollTargetRef = useRef<string | null>(null)
 
   useEffect(() => {
     loadSettings().then(setSettings)
@@ -281,6 +282,7 @@ export default function Options() {
 
   const addCustomProvider = () => {
     const provider = createCustomProvider()
+    scrollTargetRef.current = provider.id
     setSettings((s) => s ? ({
       ...s,
       customProviders: [...s.customProviders, provider],
@@ -288,6 +290,18 @@ export default function Options() {
     }) : s)
     setSearch("")
   }
+
+  useEffect(() => {
+    if (!scrollTargetRef.current) return
+    const id = scrollTargetRef.current
+    const frame = requestAnimationFrame(() => {
+      const el = document.querySelector<HTMLElement>(`[data-provider-id="${CSS.escape(id)}"]`)
+      el?.scrollIntoView({ block: "center", behavior: "smooth" })
+      el?.querySelector<HTMLInputElement>("input")?.focus({ preventScroll: true })
+      scrollTargetRef.current = null
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [settings?.customProviders.length, search])
 
   const removeCustomProvider = (id: string) => {
     setSettings((s) => {
@@ -371,11 +385,6 @@ export default function Options() {
           </div>
           <div className="opt-header__actions">
             <button
-              className={`opt-save-btn opt-save-btn--header ${saved ? "opt-save-btn--saved" : ""}`}
-              onClick={handleSave}>
-              {saved ? "[SAVED]" : "SAVE"}
-            </button>
-            <button
               className={`opt-toggle ${settings.enabled ? "on" : "off"}`}
               onClick={() => setSettings((s) => s ? { ...s, enabled: !s.enabled } : s)}
               aria-label={settings.enabled ? "Disable summarizer" : "Enable summarizer"}
@@ -419,13 +428,26 @@ export default function Options() {
       <div className="opt-scroll">
         {activeTab === "finder" ? (
           <div className="opt-card opt-related-card">
-            <div className="opt-provider">
-              <div className="opt-provider__header">
-                <div>
-                  <div className="opt-provider__name">Post Finder</div>
-                  <p className="opt-provider__note">Choose which related-post sources run when you click Find posts.</p>
+              <div className="opt-provider">
+                <div className="opt-provider__header">
+                  <div>
+                    <div className="opt-provider__name">Post Finder</div>
+                    <p className="opt-provider__note">Choose which related-post sources run when you click Find posts.</p>
+                  </div>
+                  <label className="opt-inline-toggle">
+                    <span className="opt-inline-toggle__text">JSON pages</span>
+                    <button
+                      type="button"
+                      className={`opt-toggle opt-toggle--small ${settings.allowJsonPages ? "on" : "off"}`}
+                      onClick={() => setSettings((s) => s ? { ...s, allowJsonPages: !s.allowJsonPages } : s)}
+                      aria-label={settings.allowJsonPages ? "Disable JSON pages" : "Enable JSON pages"}>
+                      <span className="opt-toggle-thumb" />
+                    </button>
+                  </label>
                 </div>
+                <p className="opt-section-note">Optional: also show the summarizer on Reddit comment `.json` endpoints.</p>
               </div>
+
               <div className="opt-finder-source">
                 <div className="opt-finder-source__head">
                   <div>
@@ -512,7 +534,6 @@ export default function Options() {
                 )}
               </div>
             </div>
-          </div>
         ) : (
           <div className="opt-card">
             {visibleProviders.length === 0 ? (

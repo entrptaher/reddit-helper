@@ -15,7 +15,7 @@ import { isLanguageModelAvailable, summarize, summarizeWithAPI, type UsageData }
 import { getCached, setCached } from "./lib/cache"
 import { PROMPT_VERSION, coverageFor } from "./lib/prompt-packer"
 import { STYLES, type StyleKey } from "./lib/styles"
-import { loadContentSettings, saveProviderSelection, type Settings } from "./lib/storage"
+import { loadContentSettings, saveProviderSelection, saveSummaryStyle, type Settings } from "./lib/storage"
 import { STATIC_PROVIDERS, fetchModels, isProviderConfigured, type ProviderDef } from "./lib/providers"
 import { EMPTY_RELATED_RESULTS, buildRelatedResultsQuery, normalizeExaSearchType, searchRelatedResults, type ExaSearchType, type RelatedResultsState } from "./lib/exa"
 import { EMPTY_REDDIT_SEARCH, buildRedditSearchQuery, getSubredditFromUrl, isCurrentRedditPost, searchReddit, type RedditSearchSort, type RedditSearchState } from "./lib/reddit-search"
@@ -51,6 +51,14 @@ export const getStyle = () => {
 type Phase = "idle" | "loading" | "streaming" | "done" | "error" | "cached"
 
 const POST_URL_RE = /\/r\/[^/]+\/comments\//
+
+function isRedditJsonPage(url: string): boolean {
+  try {
+    return new URL(url).pathname.toLowerCase().endsWith(".json")
+  } catch {
+    return /\.json(?:[?#]|$)/i.test(url)
+  }
+}
 
 function fetchRedditJsonFallback(content: ExtractedContent): Promise<ExtractedContent | null> {
   if (!content.postId || !content.subreddit) return Promise.resolve(null)
@@ -124,6 +132,7 @@ function RedditSummarizer() {
   const nanoAvailable = isLanguageModelAvailable()
 
   const onPostPage = POST_URL_RE.test(currentUrl)
+  const onJsonPage = isRedditJsonPage(currentUrl)
 
   // Full provider list: built-in nano + dynamic API providers + local/custom
   const allProviders = useMemo<ProviderDef[]>(() => {
@@ -157,6 +166,7 @@ function RedditSummarizer() {
       setSettings(s)
       setProvider(s.provider)
       setModel(s.model)
+      setStyleKey(s.summaryStyle)
       const def = [...STATIC_PROVIDERS, ...s.customProviders].find((p) => p.id === s.provider)
       setAvailableModels(def?.defaultModels ?? [s.model])
       settingsLoaded.current = true
@@ -173,6 +183,7 @@ function RedditSummarizer() {
       setEnabled(next.enabled)
       setProvider(next.provider)
       setModel(next.model)
+      setStyleKey(next.summaryStyle)
     }
     chrome.runtime.onMessage.addListener(onRuntimeMessage)
     return () => chrome.runtime.onMessage.removeListener(onRuntimeMessage)
@@ -543,6 +554,10 @@ function RedditSummarizer() {
 
   const handleStyleChange = (s: StyleKey) => {
     setStyleKey(s)
+    setSettings((current) => current ? { ...current, summaryStyle: s } : current)
+    if (settingsLoaded.current) {
+      saveSummaryStyle(s).catch(() => {})
+    }
   }
 
   const handleProviderChange = (p: string) => {
@@ -564,7 +579,7 @@ function RedditSummarizer() {
     setPhase("idle")
   }
 
-  if (!onPostPage || !enabled) return null
+  if (!onPostPage || !enabled || (onJsonPage && !settings?.allowJsonPages)) return null
 
   const showNanoWarning = provider === "gemini-nano" && !nanoAvailable
   const currentDef = providerMap[provider]

@@ -21,6 +21,7 @@ export interface ExaRelatedResult {
   id: string
   title: string
   url: string
+  displayUrl?: string
   author?: string
   image?: string
   favicon?: string
