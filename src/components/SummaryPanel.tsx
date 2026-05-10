@@ -36,41 +36,6 @@ interface Props {
   onClose: () => void
 }
 
-const PIPELINE_LABELS = [
-  "[READING POST]",
-  "[COLLECTING COMMENTS]",
-  "[PACKING EVIDENCE]",
-  "[GENERATING]",
-]
-
-type StepState = "done" | "active" | "pending" | "error"
-
-function getStepStates(phase: Phase, modelReady: boolean): StepState[] {
-  if (phase === "loading" && !modelReady) return ["done", "active", "pending", "pending"]
-  if (phase === "loading" && modelReady)  return ["done", "done", "done", "active"]
-  if (phase === "streaming")              return ["done", "done", "done", "active"]
-  if (phase === "done" || phase === "cached") return ["done", "done", "done", "done"]
-  if (phase === "error") {
-    if (!modelReady) return ["done", "done", "error", "pending"]
-    return ["done", "done", "done", "error"]
-  }
-  return ["active", "pending", "pending", "pending"]
-}
-
-function PipelineSteps({ phase, modelReady }: { phase: Phase; modelReady: boolean }) {
-  const steps = getStepStates(phase, modelReady)
-  return (
-    <div className="rds-pipeline">
-      {PIPELINE_LABELS.map((label, i) => (
-        <div key={i} className={`rds-pipeline__step rds-pipeline__step--${steps[i]}`}>
-          <span className="rds-pipeline__dot" />
-          <span>{label}</span>
-        </div>
-      ))}
-    </div>
-  )
-}
-
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
   const copy = async () => {
@@ -115,7 +80,6 @@ function ReasoningBlock({ text, active }: { text: string; active: boolean }) {
         <span className={`rds-reasoning__chevron ${open ? "rds-reasoning__chevron--open" : ""}`}>›</span>
         <span className="rds-reasoning__label">{active ? "[REASONING]" : "[REASONING LOG]"}</span>
         <span className="rds-reasoning__tokens">~{wordCount} tokens</span>
-        {active && <span className="rds-reasoning__pulse" />}
       </button>
       {open && (
         <div className="rds-reasoning__body" ref={bodyRef}>
@@ -417,10 +381,8 @@ export function SummaryPanel({
   reasoningText,
   errorMessage,
   fromCache,
-  stats,
   extractedContent,
   runtimeError,
-  modelReady = false,
   providerLabel,
   usageData,
   relatedResults,
@@ -480,8 +442,6 @@ export function SummaryPanel({
     prevHasRedditSearch.current = hasRedditSearch
   }, [hasRelated, hasRedditSearch, hasSummary])
 
-  const activeStats = stats ?? extractedContent?.stats ?? null
-  const showStats = !!activeStats && (phase === "loading" || phase === "streaming" || phase === "error")
   const isStreaming = phase === "streaming"
   const hasReasoning = !!reasoningText
   const reasoningActive = isStreaming && !rawText
@@ -537,7 +497,6 @@ export function SummaryPanel({
           <div className="rds-tab-panel" role="tabpanel">
             {activeTab === "summary" && hasSummary && (
               <>
-                {showStats && <PipelineSteps phase={phase} modelReady={modelReady} />}
                 <TrustReadout content={extractedContent} />
                 {hasReasoning && <ReasoningBlock text={reasoningText!} active={reasoningActive} />}
                 {showText && <MarkdownBody text={rawText} streaming={isStreaming} />}
