@@ -11,6 +11,10 @@
     "package": "plasmo package"
   },
   "dependencies": {
+    "@fontsource/doto": "^5.2.10",
+    "@fontsource/space-grotesk": "^5.2.10",
+    "@fontsource/space-mono": "^5.2.9",
+    "dompurify": "^3.4.2",
     "marked": "^18.0.3",
     "openai": "^4",
     "react": "18.2.0",

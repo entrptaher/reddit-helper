@@ -61,7 +61,7 @@ export function buildRelatedResultsQuery(title: string, subreddit?: string): str
   return `${site} ${cleaned || title.trim()}`
 }
 
-export function searchRelatedResults(query: string): Promise<ExaRelatedResults> {
+export function searchRelatedResults(query: string, searchType?: ExaSearchType): Promise<ExaRelatedResults> {
   return new Promise((resolve, reject) => {
     const port = chrome.runtime.connect({ name: "exa-search" })
     let settled = false
@@ -90,6 +90,6 @@ export function searchRelatedResults(query: string): Promise<ExaRelatedResults> 
       reject(new Error("Related results connection lost"))
     })
 
-    port.postMessage({ query })
+    port.postMessage({ query, searchType })
   })
 }

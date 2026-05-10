@@ -1,3 +1,5 @@
+import { checkedFetch } from "./runtime"
+
 export interface ProviderDef {
   id: string
   label: string
@@ -75,8 +77,7 @@ export async function fetchModels(baseURL: string, apiKey: string): Promise<stri
   try {
     const headers: Record<string, string> = {}
     if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`
-    const res = await fetch(providerEndpoint(normalizedBaseURL, "models"), { headers })
-    if (!res.ok) return []
+    const res = await checkedFetch(providerEndpoint(normalizedBaseURL, "models"), { headers }, { timeoutMs: 15_000, retries: 1 })
     const data = await res.json()
     const list: any[] = data.data ?? data.models ?? []
     const models = list

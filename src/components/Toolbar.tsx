@@ -1,6 +1,7 @@
 import React from "react"
 import { STYLES, STYLE_KEYS, type StyleKey } from "../lib/styles"
 import type { ProviderDef } from "../lib/providers"
+import iconUrl from "url:../../assets/icon.png"
 
 type Phase = "idle" | "loading" | "streaming" | "done" | "error" | "cached"
 
@@ -34,7 +35,7 @@ export function Toolbar({
 
   return (
     <div className="rds-toolbar">
-      <span className="rds-toolbar__brand">✦</span>
+      <img className="rds-toolbar__brand" src={iconUrl} alt="" aria-hidden="true" />
 
       <select
         className="rds-style-select"
@@ -75,7 +76,7 @@ export function Toolbar({
         aria-label="Summary style">
         {STYLE_KEYS.map((k) => (
           <option key={k} value={k}>
-            {STYLES[k].emoji} {STYLES[k].label}
+            {STYLES[k].label}
           </option>
         ))}
       </select>
@@ -85,27 +86,27 @@ export function Toolbar({
         onClick={() => chrome.runtime.sendMessage({ type: "openOptions" })}
         title="Settings"
         aria-label="Open settings">
-        ⚙
+        [SET]
       </button>
 
       {busy ? (
         <button className="rds-stop-btn" onClick={onStop} aria-label="Stop generation">
           <span className="rds-stop-icon" aria-hidden="true" />
-          Stop
+          STOP
         </button>
       ) : (
         <button
           className={`rds-analyze-btn rds-analyze-btn--${phase}`}
           onClick={onAnalyze}>
-          {(phase === "idle" || phase === "error") && "Summarize"}
-          {(phase === "done" || phase === "cached") && "Re-summarize"}
+          {(phase === "idle" || phase === "error") && "SUMMARIZE"}
+          {(phase === "done" || phase === "cached") && "RE-SUMMARIZE"}
         </button>
       )}
 
       <button
         className="rds-find-btn"
         onClick={onFindRelated}>
-        Find posts
+        FIND POSTS
       </button>
     </div>
   )

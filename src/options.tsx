@@ -1,8 +1,15 @@
 import React, { useEffect, useMemo, useState } from "react"
+import "@fontsource/space-grotesk/400.css"
+import "@fontsource/space-grotesk/500.css"
+import "@fontsource/space-grotesk/700.css"
+import "@fontsource/space-mono/400.css"
+import "@fontsource/space-mono/700.css"
+import "@fontsource/doto/600.css"
 import { createCustomProvider, STATIC_PROVIDERS, type ProviderDef } from "./lib/providers"
 import { loadSettings, saveSettings, type Settings } from "./lib/storage"
 import { getDynamicProviders, refreshModelsCache, getModelsCacheAge } from "./lib/models-cache"
 import { EXA_SEARCH_TYPES, normalizeExaSearchType } from "./lib/exa"
+import iconUrl from "url:../assets/icon.png"
 
 import "./options.css"
 
@@ -128,9 +135,9 @@ function ProviderRow({
                 onClick={handleTest}
                 disabled={testState === "testing"}>
                 {testState === "testing" ? "Testing…"
-                  : testState === "ok" ? `✓ ${testMsg}`
-                  : testState === "fail" ? "✗ Failed"
-                  : "Test"}
+                  : testState === "ok" ? `[CONNECTED] ${testMsg}`
+                  : testState === "fail" ? "[FAILED]"
+                  : "TEST"}
               </button>
               {testState === "fail" && testMsg && (
                 <span className="opt-test-error">{testMsg}</span>
@@ -357,19 +364,25 @@ export default function Options() {
     <div className="opt-root">
       <div className="opt-top">
         <header className="opt-header">
-          <span className="opt-header__icon">✦</span>
+          <img className="opt-header__icon" src={iconUrl} alt="" aria-hidden="true" />
           <div>
             <h1 className="opt-header__title">Reddit Summarizer</h1>
             <p className="opt-header__sub">Configure AI provider API keys</p>
           </div>
-          <button
-            className={`opt-toggle ${settings.enabled ? "on" : "off"}`}
-            onClick={() => setSettings((s) => s ? { ...s, enabled: !s.enabled } : s)}
-            aria-label={settings.enabled ? "Disable summarizer" : "Enable summarizer"}
-            style={{ marginLeft: "auto" }}
-          >
-            <span className="opt-toggle-thumb" />
-          </button>
+          <div className="opt-header__actions">
+            <button
+              className={`opt-save-btn opt-save-btn--header ${saved ? "opt-save-btn--saved" : ""}`}
+              onClick={handleSave}>
+              {saved ? "[SAVED]" : "SAVE"}
+            </button>
+            <button
+              className={`opt-toggle ${settings.enabled ? "on" : "off"}`}
+              onClick={() => setSettings((s) => s ? { ...s, enabled: !s.enabled } : s)}
+              aria-label={settings.enabled ? "Disable summarizer" : "Enable summarizer"}
+            >
+              <span className="opt-toggle-thumb" />
+            </button>
+          </div>
         </header>
         <div className="opt-tabs" role="tablist" aria-label="Settings sections">
           <button
@@ -425,9 +438,9 @@ export default function Options() {
                       onClick={handleTestExa}
                       disabled={exaTestState === "testing"}>
                       {exaTestState === "testing" ? "Testing…"
-                        : exaTestState === "ok" ? `✓ ${exaTestMsg}`
-                        : exaTestState === "fail" ? "✗ Failed"
-                        : "Test"}
+                        : exaTestState === "ok" ? `[CONNECTED] ${exaTestMsg}`
+                        : exaTestState === "fail" ? "[FAILED]"
+                        : "TEST"}
                     </button>
                     <button
                       className={`opt-toggle opt-toggle--small ${settings.exaEnabled ? "on" : "off"}`}
@@ -482,9 +495,9 @@ export default function Options() {
                       onClick={handleTestReddit}
                       disabled={redditTestState === "testing"}>
                       {redditTestState === "testing" ? "Testing…"
-                        : redditTestState === "ok" ? `✓ ${redditTestMsg}`
-                        : redditTestState === "fail" ? "✗ Failed"
-                        : "Test"}
+                        : redditTestState === "ok" ? `[CONNECTED] ${redditTestMsg}`
+                        : redditTestState === "fail" ? "[FAILED]"
+                        : "TEST"}
                     </button>
                     <button
                       className={`opt-toggle opt-toggle--small ${settings.redditSearchEnabled ? "on" : "off"}`}
@@ -533,13 +546,13 @@ export default function Options() {
               onClick={handleRefreshModels}
               disabled={refreshing}
               title="Refresh provider and model list from models.dev">
-              {refreshing ? "Refreshing…" : "Refresh providers"}
+              {refreshing ? "[REFRESHING]" : "REFRESH PROVIDERS"}
             </button>
           )}
           <button
             className={`opt-save-btn ${saved ? "opt-save-btn--saved" : ""}`}
             onClick={handleSave}>
-            {saved ? "✓ Saved" : "Save"}
+            {saved ? "[SAVED]" : "SAVE"}
           </button>
         </div>
       </div>

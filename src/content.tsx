@@ -1,18 +1,25 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import "@fontsource/space-grotesk/400.css"
+import "@fontsource/space-grotesk/500.css"
+import "@fontsource/space-grotesk/700.css"
+import "@fontsource/space-mono/400.css"
+import "@fontsource/space-mono/700.css"
+import "@fontsource/doto/600.css"
 
 import type { PlasmoCSConfig, PlasmoMountShadowHost } from "plasmo"
 
 import { Toolbar } from "./components/Toolbar"
 import { SummaryPanel } from "./components/SummaryPanel"
-import { extractPageContent } from "./lib/reddit-extractor"
+import { EXTRACTOR_VERSION, extractPageContent, shouldUseRedditJsonFallback, type ExtractedContent } from "./lib/reddit-extractor"
 import { isLanguageModelAvailable, summarize, summarizeWithAPI, type UsageData } from "./lib/language-model"
 import { getCached, setCached } from "./lib/cache"
+import { PROMPT_VERSION, coverageFor } from "./lib/prompt-packer"
 import { STYLES, type StyleKey } from "./lib/styles"
-import { loadSettings, saveSettings, type Settings } from "./lib/storage"
+import { loadContentSettings, saveProviderSelection, type Settings } from "./lib/storage"
 import { STATIC_PROVIDERS, fetchModels, isProviderConfigured, type ProviderDef } from "./lib/providers"
-import { getDynamicProviders, getDynamicModels } from "./lib/models-cache"
-import { EMPTY_RELATED_RESULTS, buildRelatedResultsQuery, searchRelatedResults, type RelatedResultsState } from "./lib/exa"
+import { EMPTY_RELATED_RESULTS, buildRelatedResultsQuery, normalizeExaSearchType, searchRelatedResults, type ExaSearchType, type RelatedResultsState } from "./lib/exa"
 import { EMPTY_REDDIT_SEARCH, buildRedditSearchQuery, getSubredditFromUrl, isCurrentRedditPost, searchReddit, type RedditSearchSort, type RedditSearchState } from "./lib/reddit-search"
+import type { RuntimeErrorInfo } from "./lib/runtime"
 
 import cssText from "data-text:./content.css"
 
@@ -45,6 +52,44 @@ type Phase = "idle" | "loading" | "streaming" | "done" | "error" | "cached"
 
 const POST_URL_RE = /\/r\/[^/]+\/comments\//
 
+function fetchRedditJsonFallback(content: ExtractedContent): Promise<ExtractedContent | null> {
+  if (!content.postId || !content.subreddit) return Promise.resolve(null)
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(
+      { type: "fetch-reddit-json", postId: content.postId, subreddit: content.subreddit },
+      (response) => {
+        if (chrome.runtime.lastError || !response?.ok) {
+          resolve({
+            ...content,
+            warnings: [
+              ...content.warnings,
+              response?.error ?? chrome.runtime.lastError?.message ?? "Reddit JSON fallback failed.",
+            ],
+          })
+          return
+        }
+        resolve(response.content)
+      }
+    )
+  })
+}
+
+function getContentDynamicProviders(): Promise<ProviderDef[]> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: "get-dynamic-providers" }, (response) => {
+      resolve(Array.isArray(response?.providers) ? response.providers : [])
+    })
+  })
+}
+
+function getContentDynamicModels(providerId: string): Promise<string[] | null> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: "get-dynamic-models", providerId }, (response) => {
+      resolve(Array.isArray(response?.models) ? response.models : null)
+    })
+  })
+}
+
 function RedditSummarizer() {
   const [phase, setPhase] = useState<Phase>("idle")
   const [rawText, setRawText] = useState("")
@@ -54,6 +99,8 @@ function RedditSummarizer() {
   const [fromCache, setFromCache] = useState(false)
   const [modelReady, setModelReady] = useState(false)
   const [usageData, setUsageData] = useState<UsageData | undefined>()
+  const [extractedContent, setExtractedContent] = useState<ExtractedContent | null>(null)
+  const [runtimeError, setRuntimeError] = useState<RuntimeErrorInfo | undefined>()
   const [relatedResults, setRelatedResults] = useState<RelatedResultsState>(EMPTY_RELATED_RESULTS)
   const [redditSearch, setRedditSearch] = useState<RedditSearchState>(EMPTY_REDDIT_SEARCH)
   const [redditSearchSort, setRedditSearchSort] = useState<RedditSearchSort>("relevance")
@@ -87,7 +134,14 @@ function RedditSummarizer() {
   }, [dynamicProviders, settings?.customProviders])
 
   const selectableProviders = useMemo<ProviderDef[]>(() => {
-    return allProviders.filter((p) => isProviderConfigured(p, settings?.configs?.[p.id]))
+    return allProviders.filter((p) => {
+      if (!settings) return p.id === "gemini-nano"
+      if (p.requiresApiKey && settings.configuredProviderIds?.includes(p.id)) {
+        const cfg = settings.configs[p.id]
+        return Boolean((cfg?.baseURL ?? p.baseURL).trim())
+      }
+      return isProviderConfigured(p, settings.configs?.[p.id])
+    })
   }, [allProviders, settings])
 
   const providerMap = useMemo<Record<string, ProviderDef>>(
@@ -97,7 +151,7 @@ function RedditSummarizer() {
 
   // Load settings + dynamic providers on mount
   useEffect(() => {
-    loadSettings().then((s) => {
+    loadContentSettings().then((s) => {
       setEnabled(s.enabled)
       setSettings(s)
       setProvider(s.provider)
@@ -106,20 +160,21 @@ function RedditSummarizer() {
       setAvailableModels(def?.defaultModels ?? [s.model])
       settingsLoaded.current = true
     })
-    getDynamicProviders().then((providers) => {
+    getContentDynamicProviders().then((providers) => {
       setDynamicProviders(providers)
       setProvidersLoaded(true)
     })
 
-    const onStorageChange = (changes: Record<string, chrome.storage.StorageChange>) => {
-      if (!changes.rds_settings) return
-      const next = changes.rds_settings.newValue
-      if (!next) return
-      setSettings((prev) => ({ ...prev, ...next }))
-      if (typeof next.enabled === "boolean") setEnabled(next.enabled)
+    const onRuntimeMessage = (msg: any) => {
+      if (msg?.type !== "public-settings-changed" || !msg.settings) return
+      const next = msg.settings as Settings
+      setSettings(next)
+      setEnabled(next.enabled)
+      setProvider(next.provider)
+      setModel(next.model)
     }
-    chrome.storage.onChanged.addListener(onStorageChange)
-    return () => chrome.storage.onChanged.removeListener(onStorageChange)
+    chrome.runtime.onMessage.addListener(onRuntimeMessage)
+    return () => chrome.runtime.onMessage.removeListener(onRuntimeMessage)
   }, [])
 
   useEffect(() => {
@@ -134,7 +189,7 @@ function RedditSummarizer() {
   // Persist provider + model whenever either changes (covers manual selection AND auto-selection)
   useEffect(() => {
     if (!settingsLoaded.current) return
-    loadSettings().then((s) => saveSettings({ ...s, provider, model }))
+    saveProviderSelection(provider, model).catch(() => {})
   }, [provider, model])
 
   // Fetch models when provider changes
@@ -154,7 +209,7 @@ function RedditSummarizer() {
 
     setModelsLoading(true)
 
-    getDynamicModels(provider).then((cached) => {
+    getContentDynamicModels(provider).then((cached) => {
       if (cached && cached.length > 0) {
         setModelsLoading(false)
         setAvailableModels(cached)
@@ -192,6 +247,8 @@ function RedditSummarizer() {
     setFromCache(false)
     setModelReady(false)
     setUsageData(undefined)
+    setExtractedContent(null)
+    setRuntimeError(undefined)
     relatedRequestRef.current += 1
     redditRequestRef.current += 1
     setRelatedResults(EMPTY_RELATED_RESULTS)
@@ -219,7 +276,7 @@ function RedditSummarizer() {
     }
   }, [reset])
 
-  const analyze = (style: StyleKey, currentProvider: string, currentModel: string, skipCache = false) => {
+  const analyze = async (style: StyleKey, currentProvider: string, currentModel: string, skipCache = false) => {
     cancelRef.current?.()
     setRawText("")
     setReasoningText("")
@@ -227,21 +284,36 @@ function RedditSummarizer() {
     setFromCache(false)
     setModelReady(false)
     setUsageData(undefined)
+    setRuntimeError(undefined)
 
-    const content = extractPageContent()
+    let content = extractPageContent()
+    setPhase("loading")
+    setExtractedContent(content)
+
+    if (shouldUseRedditJsonFallback(content)) {
+      const fallback = await fetchRedditJsonFallback(content)
+      if (fallback) {
+        content = fallback
+        setExtractedContent(fallback)
+      }
+    }
 
     if (!skipCache) {
-      const cacheKey = `${currentProvider}:${currentModel}`
-      const cached = getCached(window.location.href, style, cacheKey)
+      const cached = await getCached({
+        url: window.location.href,
+        style,
+        providerId: currentProvider,
+        model: currentModel,
+        postId: content.postId,
+      })
       if (cached) {
-        setRawText(cached)
+        setRawText(cached.text)
         setPhase("cached")
         setFromCache(true)
         return
       }
     }
 
-    setPhase("loading")
     const hasContent = { current: false }
 
     const onChunk = (chunk: string) => {
@@ -252,15 +324,35 @@ function RedditSummarizer() {
     const onDone = (usage?: UsageData) => {
       if (usage) setUsageData(usage)
       setPhase("done")
-      const cacheKey = `${currentProvider}:${currentModel}`
       setRawText((text) => {
-        if (text) setCached(window.location.href, style, text, cacheKey)
+        if (text) {
+          setCached({
+            url: window.location.href,
+            style,
+            providerId: currentProvider,
+            model: currentModel,
+            postId: content.postId,
+          }, {
+            text,
+            createdAt: Date.now(),
+            providerId: currentProvider,
+            model: currentModel,
+            style,
+            postId: content.postId,
+            source: content.source,
+            coverage: coverageFor(content),
+            warnings: content.warnings,
+            promptVersion: PROMPT_VERSION,
+            extractorVersion: EXTRACTOR_VERSION,
+          })
+        }
         return text
       })
     }
     const onError = (e: Error) => {
       // Connection dropped but we already have output — finalize instead of showing error
       if (hasContent.current) { onDone(); return }
+      setRuntimeError((e as Error & { runtime?: RuntimeErrorInfo }).runtime)
       setErrorMessage(e.message)
       setPhase("error")
     }
@@ -275,15 +367,12 @@ function RedditSummarizer() {
         onChunk, onDone, onError, onModelLoaded
       )
     } else {
-      const def = providerMap[currentProvider]
-      const cfg = settings?.configs?.[currentProvider] ?? {}
-      const baseURL = cfg.baseURL ?? def?.baseURL ?? ""
-      const apiKey = cfg.apiKey ?? ""
       cancelRef.current = summarizeWithAPI(
         content,
         STYLES[style].systemPrompt,
         STYLES[style].userInstruction,
-        currentModel, baseURL, apiKey,
+        currentProvider,
+        currentModel,
         onChunk, onDone, onError, onModelLoaded, onReasoning
       )
     }
@@ -292,6 +381,14 @@ function RedditSummarizer() {
   const handleAnalyze = () => {
     const reanalyze = phase === "done" || phase === "cached"
     analyze(styleKey, provider, model, reanalyze)
+  }
+
+  const handleRetry = () => {
+    analyze(styleKey, provider, model, true)
+  }
+
+  const handleOpenSettings = () => {
+    chrome.runtime.sendMessage({ type: "openOptions" })
   }
 
   const runRedditSearch = (
@@ -354,7 +451,7 @@ function RedditSummarizer() {
 
     if (exaEnabled) {
       setRelatedResults({ phase: "loading", query: relatedQuery, searchType: settings?.exaSearchType, results: [] })
-      searchRelatedResults(relatedQuery)
+      searchRelatedResults(relatedQuery, settings?.exaSearchType)
         .then((data) => {
           if (relatedRequestRef.current !== requestId) return
           setRelatedResults({
@@ -387,6 +484,39 @@ function RedditSummarizer() {
     const query = redditSearch.query ?? buildRedditSearchQuery(extractPageContent().title)
     const subreddit = redditSearch.subreddit ?? getSubredditFromUrl(window.location.href)
     runRedditSearch(query, subreddit, window.location.href, sort)
+  }
+
+  const handleExaSearchTypeChange = (searchType: ExaSearchType) => {
+    const nextSearchType = normalizeExaSearchType(searchType)
+    setSettings((s) => s ? ({ ...s, exaSearchType: nextSearchType }) : s)
+    chrome.runtime.sendMessage({ type: "save-exa-search-type", searchType: nextSearchType })
+
+    const query = relatedResults.query ?? buildRelatedResultsQuery(extractPageContent().title, getSubredditFromUrl(window.location.href))
+    if (!query) return
+    relatedRequestRef.current += 1
+    const requestId = relatedRequestRef.current
+    setRelatedResults({ phase: "loading", query, searchType: nextSearchType, results: [] })
+    searchRelatedResults(query, nextSearchType)
+      .then((data) => {
+        if (relatedRequestRef.current !== requestId) return
+        setRelatedResults({
+          phase: "done",
+          query: data.query,
+          searchType: data.searchType,
+          results: data.results,
+          searchTime: data.searchTime,
+        })
+      })
+      .catch((e) => {
+        if (relatedRequestRef.current !== requestId) return
+        setRelatedResults({
+          phase: "error",
+          query,
+          searchType: nextSearchType,
+          results: [],
+          errorMessage: e instanceof Error ? e.message : String(e),
+        })
+      })
   }
 
   const handleStop = () => {
@@ -422,14 +552,18 @@ function RedditSummarizer() {
   const showNanoWarning = provider === "gemini-nano" && !nanoAvailable
   const currentDef = providerMap[provider]
   const currentApiKey = settings?.configs?.[provider]?.apiKey ?? ""
-  const apiKeyMissing = !!(currentDef?.requiresApiKey && !currentApiKey)
+  const apiKeyMissing = !!(
+    currentDef?.requiresApiKey &&
+    !currentApiKey &&
+    !settings?.configuredProviderIds?.includes(provider)
+  )
   const showPanel = phase !== "idle" || relatedResults.phase !== "idle" || redditSearch.phase !== "idle"
 
   return (
     <div className="rds-root">
       {showNanoWarning ? (
         <p className="rds-unavailable">
-          ⚠ Gemini Nano unavailable — enable{" "}
+          [MODEL UNAVAILABLE] Gemini Nano unavailable - enable{" "}
           <code>chrome://flags/#prompt-api-for-gemini-nano</code>{" "}
           or select a different provider.
         </p>
@@ -460,10 +594,16 @@ function RedditSummarizer() {
           modelReady={modelReady}
           providerLabel={currentDef?.label}
           usageData={usageData}
+          extractedContent={extractedContent}
+          runtimeError={runtimeError}
           relatedResults={relatedResults}
           redditSearch={redditSearch}
           redditSearchSort={redditSearchSort}
+          onExaSearchTypeChange={handleExaSearchTypeChange}
           onRedditSearchSortChange={handleRedditSearchSortChange}
+          onRetry={handleRetry}
+          onOpenSettings={handleOpenSettings}
+          sourceUrl={window.location.href}
           onClose={handleClose}
         />
       )}

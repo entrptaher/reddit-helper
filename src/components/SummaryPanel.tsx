@@ -1,9 +1,13 @@
 import React, { useEffect, useRef, useState } from "react"
 import { marked } from "marked"
-import type { ThreadStats } from "../lib/reddit-extractor"
+import DOMPurify from "dompurify"
+import type { ExtractedContent, ThreadStats } from "../lib/reddit-extractor"
+import { coverageFor } from "../lib/prompt-packer"
 import type { UsageData } from "../lib/language-model"
-import { EXA_SEARCH_TYPES, type RelatedResultsState, type ExaRelatedResult } from "../lib/exa"
+import type { RuntimeErrorInfo } from "../lib/runtime"
+import { EXA_SEARCH_TYPES, type ExaSearchType, type RelatedResultsState, type ExaRelatedResult } from "../lib/exa"
 import { REDDIT_SEARCH_SORTS, type RedditSearchResult, type RedditSearchSort, type RedditSearchState } from "../lib/reddit-search"
+import iconUrl from "url:../../assets/icon.png"
 
 marked.setOptions({ breaks: true, gfm: true } as any)
 
@@ -16,34 +20,41 @@ interface Props {
   errorMessage?: string
   fromCache?: boolean
   stats?: ThreadStats | null
+  extractedContent?: ExtractedContent | null
+  runtimeError?: RuntimeErrorInfo
   modelReady?: boolean
   providerLabel?: string
   usageData?: UsageData
   relatedResults?: RelatedResultsState
   redditSearch?: RedditSearchState
   redditSearchSort?: RedditSearchSort
+  onExaSearchTypeChange?: (searchType: ExaSearchType) => void
   onRedditSearchSortChange?: (sort: RedditSearchSort) => void
+  onRetry?: () => void
+  onOpenSettings?: () => void
+  sourceUrl?: string
   onClose: () => void
 }
 
 const PIPELINE_LABELS = [
-  "Extracting thread content",
-  "Loading language model",
-  "Generating summary",
+  "[READING POST]",
+  "[COLLECTING COMMENTS]",
+  "[PACKING EVIDENCE]",
+  "[GENERATING]",
 ]
 
 type StepState = "done" | "active" | "pending" | "error"
 
 function getStepStates(phase: Phase, modelReady: boolean): StepState[] {
-  if (phase === "loading" && !modelReady) return ["done", "active", "pending"]
-  if (phase === "loading" && modelReady)  return ["done", "done",   "active"]
-  if (phase === "streaming")              return ["done", "done",   "active"]
-  if (phase === "done" || phase === "cached") return ["done", "done", "done"]
+  if (phase === "loading" && !modelReady) return ["done", "active", "pending", "pending"]
+  if (phase === "loading" && modelReady)  return ["done", "done", "done", "active"]
+  if (phase === "streaming")              return ["done", "done", "done", "active"]
+  if (phase === "done" || phase === "cached") return ["done", "done", "done", "done"]
   if (phase === "error") {
-    if (!modelReady) return ["done", "error", "pending"]
-    return ["done", "done", "error"]
+    if (!modelReady) return ["done", "done", "error", "pending"]
+    return ["done", "done", "done", "error"]
   }
-  return ["active", "pending", "pending"]
+  return ["active", "pending", "pending", "pending"]
 }
 
 function PipelineSteps({ phase, modelReady }: { phase: Phase; modelReady: boolean }) {
@@ -56,17 +67,6 @@ function PipelineSteps({ phase, modelReady }: { phase: Phase; modelReady: boolea
           <span>{label}</span>
         </div>
       ))}
-    </div>
-  )
-}
-
-function ShimmerLines() {
-  return (
-    <div className="rds-shimmer-wrap">
-      <div className="rds-shimmer" style={{ width: "88%" }} />
-      <div className="rds-shimmer" style={{ width: "76%" }} />
-      <div className="rds-shimmer" style={{ width: "82%" }} />
-      <div className="rds-shimmer" style={{ width: "68%" }} />
     </div>
   )
 }
@@ -86,7 +86,7 @@ function CopyButton({ text }: { text: string }) {
       onClick={copy}
       title="Copy to clipboard"
       aria-label="Copy summary">
-      {copied ? "✓" : "⎘"}
+      {copied ? "[COPIED]" : "[COPY]"}
     </button>
   )
 }
@@ -112,8 +112,8 @@ function ReasoningBlock({ text, active }: { text: string; active: boolean }) {
   return (
     <div className="rds-reasoning">
       <button className="rds-reasoning__toggle" onClick={() => setOpen((v) => !v)}>
-        <span className={`rds-reasoning__chevron ${open ? "rds-reasoning__chevron--open" : ""}`}>▶</span>
-        <span className="rds-reasoning__label">{active ? "Thinking…" : "Reasoning"}</span>
+        <span className={`rds-reasoning__chevron ${open ? "rds-reasoning__chevron--open" : ""}`}>›</span>
+        <span className="rds-reasoning__label">{active ? "[REASONING]" : "[REASONING LOG]"}</span>
         <span className="rds-reasoning__tokens">~{wordCount} tokens</span>
         {active && <span className="rds-reasoning__pulse" />}
       </button>
@@ -127,12 +127,95 @@ function ReasoningBlock({ text, active }: { text: string; active: boolean }) {
 }
 
 function MarkdownBody({ text, streaming }: { text: string; streaming: boolean }) {
-  const html = marked.parse(text) as string
+  const html = DOMPurify.sanitize(marked.parse(text) as string, {
+    USE_PROFILES: { html: true },
+    FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form", "input", "button"],
+    FORBID_ATTR: ["style", "onerror", "onload", "onclick", "onmouseover", "name", "id"],
+    ALLOW_DATA_ATTR: false,
+  })
   return (
     <div
       className={`rds-md ${streaming ? "rds-md--streaming" : ""}`}
       dangerouslySetInnerHTML={{ __html: html }}
     />
+  )
+}
+
+function sourceLabel(source?: ExtractedContent["source"]): string {
+  if (source === "reddit-json") return "REDDIT JSON"
+  if (source === "fallback-main") return "PAGE FALLBACK"
+  return "DOM"
+}
+
+function TrustReadout({
+  content,
+}: {
+  content?: ExtractedContent | null
+}) {
+  if (!content) return null
+  const coverage = coverageFor(content)
+  const showDetails = coverage !== "full" || content.truncated || content.warnings.length > 0
+  if (!showDetails) return null
+  const notes = [
+    `${sourceLabel(content.source)} source`,
+    `${content.commentsIncluded}/${content.commentsDetected} comments`,
+    content.truncated ? "truncated evidence" : "",
+    ...content.warnings,
+  ].filter(Boolean).slice(0, 4)
+
+  return (
+    <div className="rds-trust">
+      <span className="rds-trust__details">{notes.join(" · ")}</span>
+    </div>
+  )
+}
+
+function recoveryCopy(runtimeError?: RuntimeErrorInfo, providerLabel?: string): string {
+  if (!runtimeError) return "Retry generation or inspect the original Reddit thread."
+  if (runtimeError.type === "auth") return "Add or update the provider key in settings."
+  if (runtimeError.type === "permission") return "Check provider host permissions or local server CORS settings."
+  if (runtimeError.type === "rate_limit") return "Wait briefly, retry, or switch providers."
+  if (runtimeError.type === "bad_model") return "Choose a different model for this provider."
+  if (runtimeError.type === "timeout" || runtimeError.type === "network") return "Retry the request or switch provider if the network is unstable."
+  if (runtimeError.type === "empty_content") return "Open the Reddit thread or retry after comments finish loading."
+  if (providerLabel === "Gemini Nano (Built-in)") return "Use a configured API provider or check Chrome model readiness."
+  return "Retry generation, open settings, or inspect the original Reddit thread."
+}
+
+function ErrorRecovery({
+  runtimeError,
+  providerLabel,
+  sourceUrl,
+  onRetry,
+  onOpenSettings,
+}: {
+  runtimeError?: RuntimeErrorInfo
+  providerLabel?: string
+  sourceUrl?: string
+  onRetry?: () => void
+  onOpenSettings?: () => void
+}) {
+  return (
+    <div className="rds-recovery">
+      <div className="rds-recovery__hint">{recoveryCopy(runtimeError, providerLabel)}</div>
+      <div className="rds-recovery__actions">
+        {onRetry && (
+          <button className="rds-recovery__btn" onClick={onRetry}>
+            [RETRY]
+          </button>
+        )}
+        {onOpenSettings && ["auth", "permission", "bad_model", "provider"].includes(runtimeError?.type ?? "") && (
+          <button className="rds-recovery__btn" onClick={onOpenSettings}>
+            [SETTINGS]
+          </button>
+        )}
+        {sourceUrl && (
+          <a className="rds-recovery__btn" href={sourceUrl} target="_blank" rel="noreferrer">
+            [OPEN THREAD]
+          </a>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -175,13 +258,33 @@ function RelatedResultRow({ result }: { result: ExaRelatedResult }) {
   )
 }
 
-function RelatedResults({ state }: { state: RelatedResultsState }) {
+function RelatedResults({
+  state,
+  onSearchTypeChange,
+}: {
+  state: RelatedResultsState
+  onSearchTypeChange?: (searchType: ExaSearchType) => void
+}) {
   const count = state.results.length
-  const searchTypeLabel = EXA_SEARCH_TYPES.find((type) => type.value === state.searchType)?.label ?? "Exa"
+  const searchTypeItem = EXA_SEARCH_TYPES.find((type) => type.value === state.searchType) ?? EXA_SEARCH_TYPES[1]
+  const searchType = searchTypeItem.value
 
   return (
     <div className="rds-related">
-      {state.query && <div className="rds-related__query">{state.query}</div>}
+      <div className="rds-related__tools">
+        {state.query && <div className="rds-related__query">{state.query}</div>}
+        <label className="rds-related__sort">
+          <span>Type</span>
+          <select
+            value={searchType}
+            onChange={(e) => onSearchTypeChange?.(e.target.value as ExaSearchType)}
+            disabled={state.phase === "loading"}>
+            {EXA_SEARCH_TYPES.map((type) => (
+              <option key={type.value} value={type.value}>{type.label}</option>
+            ))}
+          </select>
+        </label>
+      </div>
       {state.phase === "loading" && (
         <div className="rds-related__status">Fetching from Exa...</div>
       )}
@@ -199,7 +302,7 @@ function RelatedResults({ state }: { state: RelatedResultsState }) {
         </div>
       )}
       {state.phase === "done" && typeof state.searchTime === "number" && (
-        <div className="rds-related__foot">{searchTypeLabel} search: {state.searchTime.toFixed(0)}ms</div>
+        <div className="rds-related__foot">{searchTypeItem.label} search: {state.searchTime.toFixed(0)}ms</div>
       )}
     </div>
   )
@@ -308,7 +411,28 @@ function formatUsage(u: UsageData): string {
   return parts.join(" · ")
 }
 
-export function SummaryPanel({ phase, rawText, reasoningText, errorMessage, fromCache, stats, modelReady = false, providerLabel, usageData, relatedResults, redditSearch, redditSearchSort = "relevance", onRedditSearchSortChange, onClose }: Props) {
+export function SummaryPanel({
+  phase,
+  rawText,
+  reasoningText,
+  errorMessage,
+  fromCache,
+  stats,
+  extractedContent,
+  runtimeError,
+  modelReady = false,
+  providerLabel,
+  usageData,
+  relatedResults,
+  redditSearch,
+  redditSearchSort = "relevance",
+  onExaSearchTypeChange,
+  onRedditSearchSortChange,
+  onRetry,
+  onOpenSettings,
+  sourceUrl,
+  onClose,
+}: Props) {
   const [open, setOpen] = useState(false)
   const [collapsed, setCollapsed] = useState(false)
   const [activeTab, setActiveTab] = useState<TabKey>("summary")
@@ -356,11 +480,11 @@ export function SummaryPanel({ phase, rawText, reasoningText, errorMessage, from
     prevHasRedditSearch.current = hasRedditSearch
   }, [hasRelated, hasRedditSearch, hasSummary])
 
-  const showStats = !!stats && (phase === "loading" || phase === "streaming")
+  const activeStats = stats ?? extractedContent?.stats ?? null
+  const showStats = !!activeStats && (phase === "loading" || phase === "streaming" || phase === "error")
   const isStreaming = phase === "streaming"
   const hasReasoning = !!reasoningText
   const reasoningActive = isStreaming && !rawText
-  const showShimmer = phase === "loading" && !stats && !hasReasoning
   const showText = (phase === "streaming" || phase === "done" || phase === "cached") && rawText
 
   return (
@@ -368,10 +492,17 @@ export function SummaryPanel({ phase, rawText, reasoningText, errorMessage, from
       <div className="rds-panel__card">
         <div className="rds-panel__head" onClick={() => setCollapsed((v) => !v)} style={{ cursor: "pointer" }}>
           <div className="rds-panel__head-left">
-            <span className="rds-panel__icon">✦</span>
-            <span className="rds-panel__title">Post tools</span>
+            <img className="rds-panel__icon" src={iconUrl} alt="" aria-hidden="true" />
+            <span className="rds-panel__title">POST TOOLS</span>
             {phase !== "idle" && <span className="rds-panel__badge">{providerLabel ?? "Gemini Nano"}</span>}
-            {fromCache && <span className="rds-panel__cached">cached</span>}
+            {extractedContent && (
+              <span
+                className={`rds-panel__coverage rds-panel__coverage--${coverageFor(extractedContent)}`}
+                title={`${sourceLabel(extractedContent.source)} · ${extractedContent.commentsIncluded}/${extractedContent.commentsDetected} comments`}>
+                [{coverageFor(extractedContent).toUpperCase()}]
+              </span>
+            )}
+            {fromCache && <span className="rds-panel__cached">[CACHED]</span>}
             {usageData && (phase === "done" || phase === "cached") && (
               <span className="rds-panel__usage">{formatUsage(usageData)}</span>
             )}
@@ -381,7 +512,7 @@ export function SummaryPanel({ phase, rawText, reasoningText, errorMessage, from
               <CopyButton text={rawText} />
             )}
             <button className="rds-icon-btn rds-icon-btn--close" onClick={onClose} title="Close" aria-label="Close">
-              ✕
+              [X]
             </button>
           </div>
         </div>
@@ -407,22 +538,36 @@ export function SummaryPanel({ phase, rawText, reasoningText, errorMessage, from
             {activeTab === "summary" && hasSummary && (
               <>
                 {showStats && <PipelineSteps phase={phase} modelReady={modelReady} />}
-                {phase === "error" && stats && <PipelineSteps phase={phase} modelReady={modelReady} />}
-                {showShimmer && <ShimmerLines />}
+                <TrustReadout content={extractedContent} />
                 {hasReasoning && <ReasoningBlock text={reasoningText!} active={reasoningActive} />}
                 {showText && <MarkdownBody text={rawText} streaming={isStreaming} />}
                 {phase === "error" && (
-                  <p className="rds-error">
-                    {errorMessage?.includes("403")
-                      ? `${errorMessage} — Ollama blocks extension requests by default. Set OLLAMA_ORIGINS=* before starting Ollama.`
-                      : errorMessage ?? (providerLabel === "Gemini Nano (Built-in)"
-                        ? "Failed. Ensure Gemini Nano is enabled: chrome://flags/#prompt-api-for-gemini-nano"
-                        : "Failed to generate summary.")}
-                  </p>
+                  <>
+                    <p className="rds-error">
+                      {runtimeError?.type ? `[ERROR: ${runtimeError.type.toUpperCase()}] ` : ""}
+                      {errorMessage?.includes("403")
+                        ? `${errorMessage} - Ollama blocks extension requests by default. Set OLLAMA_ORIGINS=* before starting Ollama.`
+                        : errorMessage ?? (providerLabel === "Gemini Nano (Built-in)"
+                          ? "Failed. Ensure Gemini Nano is enabled: chrome://flags/#prompt-api-for-gemini-nano"
+                          : "Failed to generate summary.")}
+                    </p>
+                    <ErrorRecovery
+                      runtimeError={runtimeError}
+                      providerLabel={providerLabel}
+                      sourceUrl={sourceUrl}
+                      onRetry={onRetry}
+                      onOpenSettings={onOpenSettings}
+                    />
+                  </>
                 )}
               </>
             )}
-            {activeTab === "exa" && hasRelated && <RelatedResults state={relatedResults} />}
+            {activeTab === "exa" && hasRelated && (
+              <RelatedResults
+                state={relatedResults}
+                onSearchTypeChange={onExaSearchTypeChange}
+              />
+            )}
             {activeTab === "reddit" && hasRedditSearch && (
               <RedditSearchResults
                 state={redditSearch}

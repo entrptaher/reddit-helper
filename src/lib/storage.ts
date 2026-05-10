@@ -16,6 +16,7 @@ export interface Settings {
   exaApiKey?: string
   exaSearchType: ExaSearchType
   redditSearchEnabled: boolean
+  configuredProviderIds?: string[]
 }
 
 const DEFAULTS: Settings = {
@@ -75,4 +76,49 @@ export function loadSettings(): Promise<Settings> {
 
 export function saveSettings(s: Settings): Promise<void> {
   return new Promise((resolve) => chrome.storage.local.set({ rds_settings: s }, resolve))
+}
+
+export function toPublicSettings(settings: Settings): Settings {
+  const configs = Object.fromEntries(
+    Object.entries(settings.configs).map(([id, cfg]) => [
+      id,
+      { ...cfg, apiKey: cfg.apiKey ? "" : undefined },
+    ])
+  )
+  const configuredProviderIds = Object.entries(settings.configs)
+    .filter(([, cfg]) => Boolean(cfg.apiKey?.trim() || cfg.baseURL?.trim()))
+    .map(([id]) => id)
+
+  return {
+    ...settings,
+    configs,
+    exaApiKey: settings.exaApiKey ? "" : undefined,
+    configuredProviderIds,
+  }
+}
+
+export function loadContentSettings(): Promise<Settings> {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type: "get-public-settings" }, (response) => {
+      const err = chrome.runtime.lastError
+      if (err) {
+        reject(new Error(err.message))
+        return
+      }
+      resolve(normalizeSettings(response?.settings))
+    })
+  })
+}
+
+export function saveProviderSelection(provider: string, model: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type: "save-provider-selection", provider, model }, (response) => {
+      const err = chrome.runtime.lastError
+      if (err || !response?.ok) {
+        reject(new Error(err?.message ?? response?.error ?? "Failed to save provider selection"))
+        return
+      }
+      resolve()
+    })
+  })
 }

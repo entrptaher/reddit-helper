@@ -1,10 +1,185 @@
 import OpenAI from "openai"
-import { loadSettings } from "./lib/storage"
-import { normalizeBaseURL, providerEndpoint } from "./lib/providers"
+import { loadSettings, saveSettings, toPublicSettings } from "./lib/storage"
+import { normalizeBaseURL, providerEndpoint, STATIC_PROVIDERS } from "./lib/providers"
 import { normalizeExaSearchType } from "./lib/exa"
+import { getDynamicModels, getDynamicProviders } from "./lib/models-cache"
+import { getCached, setCached } from "./lib/cache"
+import { packPrompt, validateExtractedContent } from "./lib/prompt-packer"
+import { checkedFetch, normalizeRuntimeError, RuntimeError, withTimeoutAndRetry } from "./lib/runtime"
+import type { ExtractedContent } from "./lib/reddit-extractor"
 
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg?.type === "openOptions") chrome.runtime.openOptionsPage()
+try {
+  const result = chrome.storage.local.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" })
+  ;(result as Promise<void> | undefined)?.catch?.(() => {})
+} catch {}
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local" || !changes.rds_settings?.newValue) return
+  chrome.tabs.query({ url: ["https://*.reddit.com/*"] }, (tabs) => {
+    const settings = toPublicSettings(changes.rds_settings.newValue)
+    tabs.forEach((tab) => {
+      if (typeof tab.id === "number") {
+        chrome.tabs.sendMessage(tab.id, { type: "public-settings-changed", settings }).catch?.(() => {})
+      }
+    })
+  })
+})
+
+async function resolveProvider(providerId: string) {
+  const settings = await loadSettings()
+  const dynamicProviders = await getDynamicProviders().catch(() => [])
+  const providers = [...STATIC_PROVIDERS, ...dynamicProviders, ...settings.customProviders]
+  const def = providers.find((item) => item.id === providerId)
+  if (!def) throw new RuntimeError({
+    type: "provider",
+    message: `Provider ${providerId} is not configured.`,
+    recoverable: true,
+    retryable: false,
+    providerId,
+  })
+
+  const cfg = settings.configs[providerId] ?? {}
+  const baseURL = cfg.baseURL ?? def.baseURL
+  const apiKey = cfg.apiKey ?? ""
+
+  if (!baseURL) throw new RuntimeError({
+    type: "provider",
+    message: `Provider ${def.label} is missing a base URL.`,
+    recoverable: true,
+    retryable: false,
+    providerId,
+  })
+  if (def.requiresApiKey && !apiKey.trim()) throw new RuntimeError({
+    type: "auth",
+    message: `Provider ${def.label} is missing an API key.`,
+    recoverable: true,
+    retryable: false,
+    providerId,
+  })
+
+  return { def, baseURL, apiKey }
+}
+
+function compact(text: string): string {
+  return String(text ?? "").replace(/\u00a0/g, " ").replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n").trim()
+}
+
+function collectJsonComments(node: any, out: string[] = []): string[] {
+  const data = node?.data ?? node
+  if (data?.body && data.body !== "[deleted]" && data.body !== "[removed]") out.push(compact(data.body))
+  const children = data?.replies?.data?.children
+  if (Array.isArray(children)) children.forEach((child) => collectJsonComments(child, out))
+  return out
+}
+
+async function fetchRedditJsonContent(subreddit: string, postId: string): Promise<ExtractedContent> {
+  const safeSubreddit = /^[A-Za-z0-9_]+$/.test(subreddit) ? subreddit : ""
+  const safePostId = /^[A-Za-z0-9_]+$/.test(postId) ? postId : ""
+  if (!safeSubreddit || !safePostId) throw new RuntimeError({
+    type: "empty_content",
+    message: "Reddit JSON fallback needs a valid subreddit and post id.",
+    recoverable: true,
+    retryable: false,
+  })
+
+  const url = `https://www.reddit.com/r/${safeSubreddit}/comments/${safePostId}.json?limit=100&raw_json=1`
+  const res = await checkedFetch(url, { headers: { accept: "application/json" } }, { timeoutMs: 15_000, retries: 1 })
+  const data = await res.json()
+  const post = data?.[0]?.data?.children?.[0]?.data ?? {}
+  const commentsRoot = data?.[1]?.data?.children ?? []
+  const comments = commentsRoot
+    .flatMap((child: any) => collectJsonComments(child))
+    .map(compact)
+    .filter((text: string, index: number, arr: string[]) => text.length > 12 && arr.indexOf(text) === index)
+    .slice(0, 100)
+  const body = compact(post.selftext || post.url_overridden_by_dest || post.url || "")
+  const title = compact(post.title || "")
+  const combined = [body, ...comments].join("\n\n")
+  const words = combined.split(/\s+/).filter(Boolean).length
+  const commentsDetected = Number(post.num_comments ?? comments.length)
+
+  return {
+    source: "reddit-json",
+    postId: safePostId,
+    subreddit: safeSubreddit,
+    title,
+    body,
+    bodyChars: body.length,
+    comments,
+    commentsDetected,
+    commentsIncluded: comments.length,
+    truncated: commentsDetected > comments.length,
+    warnings: commentsDetected > comments.length ? ["Reddit JSON returned only a subset of comments."] : [],
+    stats: {
+      words,
+      comments: commentsDetected,
+      upvotes: typeof post.score === "number" ? post.score : null,
+      readMinutes: Math.max(1, Math.round(words / 200)),
+      savedMinutes: Math.max(1, Math.round(words / 200) - 1),
+    },
+  }
+}
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === "openOptions") {
+    chrome.runtime.openOptionsPage()
+    sendResponse?.({ ok: true })
+    return false
+  }
+  if (msg?.type === "get-public-settings") {
+    loadSettings()
+      .then((settings) => sendResponse({ ok: true, settings: toPublicSettings(settings) }))
+      .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }))
+    return true
+  }
+  if (msg?.type === "save-provider-selection") {
+    loadSettings()
+      .then((settings) => saveSettings({ ...settings, provider: String(msg.provider), model: String(msg.model) }))
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }))
+    return true
+  }
+  if (msg?.type === "save-exa-search-type") {
+    loadSettings()
+      .then((settings) => saveSettings({ ...settings, exaSearchType: normalizeExaSearchType(msg.searchType) }))
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }))
+    return true
+  }
+  if (msg?.type === "fetch-reddit-json") {
+    fetchRedditJsonContent(String(msg.subreddit ?? ""), String(msg.postId ?? ""))
+      .then((content) => sendResponse({ ok: true, content }))
+      .catch((error) => {
+        const normalized = normalizeRuntimeError(error)
+        sendResponse({ ok: false, error: normalized.message, runtimeError: normalized })
+      })
+    return true
+  }
+  if (msg?.type === "summary-cache-get") {
+    getCached(msg.input)
+      .then((entry) => sendResponse({ ok: true, entry }))
+      .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }))
+    return true
+  }
+  if (msg?.type === "summary-cache-set") {
+    setCached(msg.input, msg.entry)
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }))
+    return true
+  }
+  if (msg?.type === "get-dynamic-providers") {
+    getDynamicProviders()
+      .then((providers) => sendResponse({ ok: true, providers }))
+      .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error), providers: [] }))
+    return true
+  }
+  if (msg?.type === "get-dynamic-models") {
+    getDynamicModels(String(msg.providerId ?? ""))
+      .then((models) => sendResponse({ ok: true, models }))
+      .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error), models: null }))
+    return true
+  }
+  return false
 })
 
 chrome.runtime.onConnect.addListener((port) => {
@@ -17,7 +192,7 @@ chrome.runtime.onConnect.addListener((port) => {
           return
         }
 
-        const r = await fetch("https://api.exa.ai/search", {
+        const r = await checkedFetch("https://api.exa.ai/search", {
           method: "POST",
           headers: {
             "content-type": "application/json",
@@ -28,11 +203,6 @@ chrome.runtime.onConnect.addListener((port) => {
             type: normalizeExaSearchType(searchType),
           }),
         })
-
-        if (!r.ok) {
-          port.postMessage({ ok: false, error: `HTTP ${r.status}` })
-          return
-        }
 
         const data = await r.json()
         port.postMessage({ ok: true, count: Array.isArray(data.results) ? data.results.length : 0 })
@@ -56,14 +226,9 @@ chrome.runtime.onConnect.addListener((port) => {
         url.searchParams.set("limit", "3")
         if (scopedSubreddit) url.searchParams.set("restrict_sr", "1")
 
-        const r = await fetch(url.toString(), {
+        const r = await checkedFetch(url.toString(), {
           headers: { accept: "application/json" },
-        })
-
-        if (!r.ok) {
-          port.postMessage({ ok: false, error: `HTTP ${r.status}` })
-          return
-        }
+        }, { timeoutMs: 12_000, retries: 1 })
 
         const data = await r.json()
         port.postMessage({ ok: true, count: Array.isArray(data?.data?.children) ? data.data.children.length : 0 })
@@ -89,14 +254,9 @@ chrome.runtime.onConnect.addListener((port) => {
         url.searchParams.set("sort", searchSort)
         if (scopedSubreddit) url.searchParams.set("restrict_sr", "1")
 
-        const r = await fetch(url.toString(), {
+        const r = await checkedFetch(url.toString(), {
           headers: { accept: "application/json" },
-        })
-
-        if (!r.ok) {
-          port.postMessage({ ok: false, error: `Reddit HTTP ${r.status}` })
-          return
-        }
+        }, { timeoutMs: 12_000, retries: 1 })
 
         const data = await r.json()
         const results = Array.isArray(data?.data?.children)
@@ -131,30 +291,25 @@ chrome.runtime.onConnect.addListener((port) => {
   }
 
   if (port.name === "exa-search") {
-    port.onMessage.addListener(async ({ query }) => {
+    port.onMessage.addListener(async ({ query, searchType: requestedSearchType }) => {
       try {
         const settings = await loadSettings()
         const apiKey = settings.exaApiKey?.trim()
-        const searchType = normalizeExaSearchType(settings.exaSearchType)
+        const searchType = normalizeExaSearchType(requestedSearchType ?? settings.exaSearchType)
 
         if (!apiKey) {
           port.postMessage({ ok: false, error: "Add an Exa API key in options to show related results." })
           return
         }
 
-        const r = await fetch("https://api.exa.ai/search", {
+        const r = await checkedFetch("https://api.exa.ai/search", {
           method: "POST",
           headers: {
             "content-type": "application/json",
             "x-api-key": apiKey,
           },
           body: JSON.stringify({ query, type: searchType }),
-        })
-
-        if (!r.ok) {
-          port.postMessage({ ok: false, error: `Exa HTTP ${r.status}` })
-          return
-        }
+        }, { timeoutMs: 18_000, retries: 1 })
 
         const data = await r.json()
         const results = Array.isArray(data.results)
@@ -188,8 +343,7 @@ chrome.runtime.onConnect.addListener((port) => {
       const headers: Record<string, string> = {}
       if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`
       try {
-        const r = await fetch(providerEndpoint(baseURL, "models"), { headers })
-        if (!r.ok) { port.postMessage({ ok: false, error: `HTTP ${r.status}` }); return }
+        const r = await checkedFetch(providerEndpoint(baseURL, "models"), { headers }, { timeoutMs: 15_000, retries: 1 })
         const data = await r.json()
         const list: any[] = data.data ?? data.models ?? []
         port.postMessage({ ok: true, count: list.length })
@@ -208,26 +362,32 @@ chrome.runtime.onConnect.addListener((port) => {
     let cancelled = false
     port.onDisconnect.addListener(() => { cancelled = true })
 
-    const { content, systemPrompt, userInstruction, model, baseURL, apiKey } = msg
+    const { content, systemPrompt, userInstruction, providerId, model } = msg
 
     try {
+      const validation = validateExtractedContent(content)
+      if (validation) throw new RuntimeError({ ...validation, providerId })
+      const resolved = await resolveProvider(providerId)
       const client = new OpenAI({
-        apiKey: apiKey || "none",
-        baseURL: normalizeBaseURL(baseURL),
+        apiKey: resolved.apiKey || "none",
+        baseURL: normalizeBaseURL(resolved.baseURL),
         dangerouslyAllowBrowser: true,
       })
 
-      const prompt = `${userInstruction}\n\nTitle: ${content.title}\n\n${content.body.slice(0, 60_000)}`
+      const prompt = packPrompt(content, userInstruction).text
       const startMs = Date.now()
-      const stream = await client.chat.completions.create({
-        model,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: prompt },
-        ],
-        stream: true,
-        stream_options: { include_usage: true },
-      })
+      const stream = await withTimeoutAndRetry((signal) =>
+        client.chat.completions.create({
+          model,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: prompt },
+          ],
+          stream: true,
+          stream_options: { include_usage: true },
+        }, { signal }),
+        { timeoutMs: 45_000, retries: 1 }
+      )
 
       let accumulated = ""
       let accumulatedReasoning = ""
@@ -259,20 +419,8 @@ chrome.runtime.onConnect.addListener((port) => {
       }
     } catch (e) {
       if (cancelled) return
-      let msg = "Unknown error"
-      if (e instanceof Error) {
-        const status = (e as any).status
-        const code = (e as any).code
-        const detail = (e as any).error?.message ?? (e as any).error?.error ?? ""
-        msg = [
-          status ? `HTTP ${status}` : null,
-          code ? `(${code})` : null,
-          detail || e.message,
-        ].filter(Boolean).join(" — ")
-      } else {
-        msg = String(e)
-      }
-      port.postMessage({ type: "error", message: msg })
+      const error = normalizeRuntimeError(e, providerId)
+      port.postMessage({ type: "error", message: error.message, error })
     }
   })
 })
