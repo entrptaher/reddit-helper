@@ -116,6 +116,7 @@ function RedditSummarizer() {
   const [providersLoaded, setProvidersLoaded] = useState(false)
 
   const cancelRef = useRef<(() => void) | null>(null)
+  const summaryRequestRef = useRef(0)
   const relatedRequestRef = useRef(0)
   const redditRequestRef = useRef(0)
   const currentUrlRef = useRef(window.location.href)
@@ -240,6 +241,7 @@ function RedditSummarizer() {
   const reset = useCallback(() => {
     cancelRef.current?.()
     cancelRef.current = null
+    summaryRequestRef.current += 1
     setPhase("idle")
     setRawText("")
     setReasoningText("")
@@ -285,6 +287,9 @@ function RedditSummarizer() {
     setModelReady(false)
     setUsageData(undefined)
     setRuntimeError(undefined)
+    summaryRequestRef.current += 1
+    const requestId = summaryRequestRef.current
+    const isCurrentRequest = () => summaryRequestRef.current === requestId
 
     let content = extractPageContent()
     setPhase("loading")
@@ -292,6 +297,7 @@ function RedditSummarizer() {
 
     if (shouldUseRedditJsonFallback(content)) {
       const fallback = await fetchRedditJsonFallback(content)
+      if (!isCurrentRequest()) return
       if (fallback) {
         content = fallback
         setExtractedContent(fallback)
@@ -306,6 +312,7 @@ function RedditSummarizer() {
         model: currentModel,
         postId: content.postId,
       })
+      if (!isCurrentRequest()) return
       if (cached) {
         setRawText(cached.text)
         setPhase("cached")
@@ -317,11 +324,13 @@ function RedditSummarizer() {
     const hasContent = { current: false }
 
     const onChunk = (chunk: string) => {
+      if (!isCurrentRequest()) return
       hasContent.current = true
       setRawText(chunk)
       setPhase((p) => (p === "loading" ? "streaming" : p))
     }
     const onDone = (usage?: UsageData) => {
+      if (!isCurrentRequest()) return
       if (usage) setUsageData(usage)
       setPhase("done")
       setRawText((text) => {
@@ -350,14 +359,21 @@ function RedditSummarizer() {
       })
     }
     const onError = (e: Error) => {
+      if (!isCurrentRequest()) return
       // Connection dropped but we already have output — finalize instead of showing error
       if (hasContent.current) { onDone(); return }
       setRuntimeError((e as Error & { runtime?: RuntimeErrorInfo }).runtime)
       setErrorMessage(e.message)
       setPhase("error")
     }
-    const onModelLoaded = () => setModelReady(true)
-    const onReasoning = (text: string) => setReasoningText(text)
+    const onModelLoaded = () => {
+      if (isCurrentRequest()) setModelReady(true)
+    }
+    const onReasoning = (text: string) => {
+      if (isCurrentRequest()) setReasoningText(text)
+    }
+
+    if (!isCurrentRequest()) return
 
     if (currentProvider === "gemini-nano") {
       cancelRef.current = summarize(
@@ -540,6 +556,7 @@ function RedditSummarizer() {
   const handleClose = () => {
     cancelRef.current?.()
     cancelRef.current = null
+    summaryRequestRef.current += 1
     relatedRequestRef.current += 1
     redditRequestRef.current += 1
     setRelatedResults(EMPTY_RELATED_RESULTS)
