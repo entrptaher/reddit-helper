@@ -83,14 +83,22 @@ function ReasoningBlock({ text, active }: { text: string; active: boolean }) {
       </button>
       {open && (
         <div className="rds-reasoning__body" ref={bodyRef}>
-          <pre className="rds-reasoning__text">{text}</pre>
+          <MarkdownBody text={text} streaming={false} className="rds-md--reasoning" />
         </div>
       )}
     </div>
   )
 }
 
-function MarkdownBody({ text, streaming }: { text: string; streaming: boolean }) {
+function MarkdownBody({
+  text,
+  streaming,
+  className = "",
+}: {
+  text: string
+  streaming: boolean
+  className?: string
+}) {
   const html = DOMPurify.sanitize(marked.parse(text) as string, {
     USE_PROFILES: { html: true },
     FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form", "input", "button"],
@@ -99,7 +107,7 @@ function MarkdownBody({ text, streaming }: { text: string; streaming: boolean })
   })
   return (
     <div
-      className={`rds-md ${streaming ? "rds-md--streaming" : ""}`}
+      className={`rds-md ${streaming ? "rds-md--streaming" : ""} ${className}`.trim()}
       dangerouslySetInnerHTML={{ __html: html }}
     />
   )
@@ -113,19 +121,27 @@ function sourceLabel(source?: ExtractedContent["source"]): string {
 
 function TrustReadout({
   content,
+  providerLabel,
+  fromCache,
+  usageData,
 }: {
   content?: ExtractedContent | null
+  providerLabel?: string
+  fromCache?: boolean
+  usageData?: UsageData
 }) {
   if (!content) return null
   const coverage = coverageFor(content)
-  const showDetails = coverage !== "full" || content.truncated || content.warnings.length > 0
-  if (!showDetails) return null
   const notes = [
     `${sourceLabel(content.source)} source`,
     `${content.commentsIncluded}/${content.commentsDetected} comments`,
+    providerLabel ?? "Gemini Nano",
+    coverage,
+    fromCache ? "cached" : "fresh",
+    usageData ? formatUsage(usageData) : "",
     content.truncated ? "truncated evidence" : "",
     ...content.warnings,
-  ].filter(Boolean).slice(0, 4)
+  ].filter(Boolean)
 
   return (
     <div className="rds-trust">
@@ -454,18 +470,6 @@ export function SummaryPanel({
           <div className="rds-panel__head-left">
             <img className="rds-panel__icon" src={iconUrl} alt="" aria-hidden="true" />
             <span className="rds-panel__title">POST TOOLS</span>
-            {phase !== "idle" && <span className="rds-panel__badge">{providerLabel ?? "Gemini Nano"}</span>}
-            {extractedContent && (
-              <span
-                className={`rds-panel__coverage rds-panel__coverage--${coverageFor(extractedContent)}`}
-                title={`${sourceLabel(extractedContent.source)} · ${extractedContent.commentsIncluded}/${extractedContent.commentsDetected} comments`}>
-                [{coverageFor(extractedContent).toUpperCase()}]
-              </span>
-            )}
-            {fromCache && <span className="rds-panel__cached">[CACHED]</span>}
-            {usageData && (phase === "done" || phase === "cached") && (
-              <span className="rds-panel__usage">{formatUsage(usageData)}</span>
-            )}
           </div>
           <div className="rds-panel__head-right" onClick={(e) => e.stopPropagation()}>
             {(phase === "done" || phase === "cached") && rawText && (
@@ -497,7 +501,12 @@ export function SummaryPanel({
           <div className="rds-tab-panel" role="tabpanel">
             {activeTab === "summary" && hasSummary && (
               <>
-                <TrustReadout content={extractedContent} />
+                <TrustReadout
+                  content={extractedContent}
+                  providerLabel={providerLabel}
+                  fromCache={fromCache}
+                  usageData={usageData}
+                />
                 {hasReasoning && <ReasoningBlock text={reasoningText!} active={reasoningActive} />}
                 {showText && <MarkdownBody text={rawText} streaming={isStreaming} />}
                 {phase === "error" && (
