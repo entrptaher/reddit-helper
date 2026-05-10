@@ -17,6 +17,7 @@ interface Props {
   onProviderChange: (p: string) => void
   onModelChange: (m: string) => void
   onAnalyze: () => void
+  onFindRelated: () => void
   onStop: () => void
 }
 
@@ -27,7 +28,7 @@ function modelLabel(m: string): string {
 
 export function Toolbar({
   phase, style, provider, model, providers, availableModels, modelsLoading, apiKeyMissing,
-  onStyleChange, onProviderChange, onModelChange, onAnalyze, onStop
+  onStyleChange, onProviderChange, onModelChange, onAnalyze, onFindRelated, onStop
 }: Props) {
   const busy = phase === "loading" || phase === "streaming"
 
@@ -96,10 +97,16 @@ export function Toolbar({
         <button
           className={`rds-analyze-btn rds-analyze-btn--${phase}`}
           onClick={onAnalyze}>
-          {(phase === "idle" || phase === "error") && "✨ Analyze"}
-          {(phase === "done" || phase === "cached") && "↺ Re-analyze"}
+          {(phase === "idle" || phase === "error") && "Summarize"}
+          {(phase === "done" || phase === "cached") && "Re-summarize"}
         </button>
       )}
+
+      <button
+        className="rds-find-btn"
+        onClick={onFindRelated}>
+        Find posts
+      </button>
     </div>
   )
 }

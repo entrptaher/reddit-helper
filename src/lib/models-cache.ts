@@ -1,4 +1,5 @@
 import type { ProviderDef } from "./providers"
+import { normalizeBaseURL } from "./providers"
 import bundledData from "./models-dev-data.json"
 
 const CACHE_KEY = "rds_models_v1"
@@ -42,7 +43,7 @@ function buildFromData(data: Record<string, any>): { providers: ProviderDef[]; m
 
   for (const [id, p] of Object.entries(data)) {
     if (p.npm !== "@ai-sdk/openai-compatible") continue
-    const api: string = p.api ?? ""
+    const api = normalizeBaseURL(p.api ?? "")
     if (!api || api.includes("${")) continue
 
     seen.add(id)

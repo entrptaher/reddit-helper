@@ -9,8 +9,10 @@ import { isLanguageModelAvailable, summarize, summarizeWithAPI, type UsageData }
 import { getCached, setCached } from "./lib/cache"
 import { STYLES, type StyleKey } from "./lib/styles"
 import { loadSettings, saveSettings, type Settings } from "./lib/storage"
-import { STATIC_PROVIDERS, STATIC_PROVIDER_MAP, fetchModels, type ProviderDef } from "./lib/providers"
+import { STATIC_PROVIDERS, fetchModels, isProviderConfigured, type ProviderDef } from "./lib/providers"
 import { getDynamicProviders, getDynamicModels } from "./lib/models-cache"
+import { EMPTY_RELATED_RESULTS, buildRelatedResultsQuery, searchRelatedResults, type RelatedResultsState } from "./lib/exa"
+import { EMPTY_REDDIT_SEARCH, buildRedditSearchQuery, getSubredditFromUrl, isCurrentRedditPost, searchReddit, type RedditSearchSort, type RedditSearchState } from "./lib/reddit-search"
 
 import cssText from "data-text:./content.css"
 
@@ -52,16 +54,23 @@ function RedditSummarizer() {
   const [fromCache, setFromCache] = useState(false)
   const [modelReady, setModelReady] = useState(false)
   const [usageData, setUsageData] = useState<UsageData | undefined>()
+  const [relatedResults, setRelatedResults] = useState<RelatedResultsState>(EMPTY_RELATED_RESULTS)
+  const [redditSearch, setRedditSearch] = useState<RedditSearchState>(EMPTY_REDDIT_SEARCH)
+  const [redditSearchSort, setRedditSearchSort] = useState<RedditSearchSort>("relevance")
   const [currentUrl, setCurrentUrl] = useState(window.location.href)
 
+  const [enabled, setEnabled] = useState(true)
   const [settings, setSettings] = useState<Settings | null>(null)
   const [provider, setProvider] = useState("gemini-nano")
   const [model, setModel] = useState("gemini-nano")
   const [availableModels, setAvailableModels] = useState<string[]>(["gemini-nano"])
   const [modelsLoading, setModelsLoading] = useState(false)
   const [dynamicProviders, setDynamicProviders] = useState<ProviderDef[]>([])
+  const [providersLoaded, setProvidersLoaded] = useState(false)
 
   const cancelRef = useRef<(() => void) | null>(null)
+  const relatedRequestRef = useRef(0)
+  const redditRequestRef = useRef(0)
   const currentUrlRef = useRef(window.location.href)
   const settingsLoaded = useRef(false)
   const nanoAvailable = isLanguageModelAvailable()
@@ -70,13 +79,16 @@ function RedditSummarizer() {
 
   // Full provider list: built-in nano + dynamic API providers + local/custom
   const allProviders = useMemo<ProviderDef[]>(() => {
-    const [nano, ollama, custom] = [
+    const [nano, ollama] = [
       STATIC_PROVIDERS[0],
       STATIC_PROVIDERS[1],
-      STATIC_PROVIDERS[2],
     ]
-    return [nano, ...dynamicProviders, ollama, custom]
-  }, [dynamicProviders])
+    return [nano, ...dynamicProviders, ollama, ...(settings?.customProviders ?? [])]
+  }, [dynamicProviders, settings?.customProviders])
+
+  const selectableProviders = useMemo<ProviderDef[]>(() => {
+    return allProviders.filter((p) => isProviderConfigured(p, settings?.configs?.[p.id]))
+  }, [allProviders, settings])
 
   const providerMap = useMemo<Record<string, ProviderDef>>(
     () => Object.fromEntries(allProviders.map((p) => [p.id, p])),
@@ -86,15 +98,38 @@ function RedditSummarizer() {
   // Load settings + dynamic providers on mount
   useEffect(() => {
     loadSettings().then((s) => {
+      setEnabled(s.enabled)
       setSettings(s)
       setProvider(s.provider)
       setModel(s.model)
-      const def = STATIC_PROVIDER_MAP[s.provider]
+      const def = [...STATIC_PROVIDERS, ...s.customProviders].find((p) => p.id === s.provider)
       setAvailableModels(def?.defaultModels ?? [s.model])
       settingsLoaded.current = true
     })
-    getDynamicProviders().then(setDynamicProviders)
+    getDynamicProviders().then((providers) => {
+      setDynamicProviders(providers)
+      setProvidersLoaded(true)
+    })
+
+    const onStorageChange = (changes: Record<string, chrome.storage.StorageChange>) => {
+      if (!changes.rds_settings) return
+      const next = changes.rds_settings.newValue
+      if (!next) return
+      setSettings((prev) => ({ ...prev, ...next }))
+      if (typeof next.enabled === "boolean") setEnabled(next.enabled)
+    }
+    chrome.storage.onChanged.addListener(onStorageChange)
+    return () => chrome.storage.onChanged.removeListener(onStorageChange)
   }, [])
+
+  useEffect(() => {
+    if (!settingsLoaded.current || !providersLoaded || selectableProviders.length === 0) return
+    if (selectableProviders.some((p) => p.id === provider)) return
+
+    const next = selectableProviders[0]
+    setProvider(next.id)
+    setModel(next.defaultModels[0] ?? next.id)
+  }, [provider, providersLoaded, selectableProviders])
 
   // Persist provider + model whenever either changes (covers manual selection AND auto-selection)
   useEffect(() => {
@@ -136,8 +171,9 @@ function RedditSummarizer() {
         setModelsLoading(false)
         const fallback = def?.defaultModels ?? []
         if (live.length > 0) {
-          setAvailableModels(live)
-          setModel((prev) => live.includes(prev) ? prev : live[0])
+          const models = def?.custom ? Array.from(new Set([...fallback, ...live])).sort() : live
+          setAvailableModels(models)
+          setModel((prev) => models.includes(prev) ? prev : models[0])
         } else {
           setAvailableModels(fallback)
           setModel((prev) => fallback.includes(prev) ? prev : fallback[0] ?? prev)
@@ -156,6 +192,10 @@ function RedditSummarizer() {
     setFromCache(false)
     setModelReady(false)
     setUsageData(undefined)
+    relatedRequestRef.current += 1
+    redditRequestRef.current += 1
+    setRelatedResults(EMPTY_RELATED_RESULTS)
+    setRedditSearch(EMPTY_REDDIT_SEARCH)
   }, [])
 
   // SPA navigation reset
@@ -188,6 +228,8 @@ function RedditSummarizer() {
     setModelReady(false)
     setUsageData(undefined)
 
+    const content = extractPageContent()
+
     if (!skipCache) {
       const cacheKey = `${currentProvider}:${currentModel}`
       const cached = getCached(window.location.href, style, cacheKey)
@@ -200,7 +242,6 @@ function RedditSummarizer() {
     }
 
     setPhase("loading")
-    const content = extractPageContent()
     const hasContent = { current: false }
 
     const onChunk = (chunk: string) => {
@@ -253,6 +294,101 @@ function RedditSummarizer() {
     analyze(styleKey, provider, model, reanalyze)
   }
 
+  const runRedditSearch = (
+    query: string,
+    subreddit: string | undefined,
+    currentPostUrl: string,
+    sort: RedditSearchSort
+  ) => {
+    redditRequestRef.current += 1
+    const requestId = redditRequestRef.current
+
+    setRedditSearch({
+      phase: "loading",
+      query,
+      subreddit,
+      sort,
+      results: [],
+    })
+
+    searchReddit(query, subreddit, sort)
+      .then((data) => {
+        if (redditRequestRef.current !== requestId) return
+        setRedditSearch({
+          phase: "done",
+          query: data.query,
+          subreddit: data.subreddit,
+          sort: data.sort,
+          results: data.results.filter((result) => !isCurrentRedditPost(result, currentPostUrl)),
+        })
+      })
+      .catch((e) => {
+        if (redditRequestRef.current !== requestId) return
+        setRedditSearch({
+          phase: "error",
+          query,
+          subreddit,
+          sort,
+          results: [],
+          errorMessage: e instanceof Error ? e.message : String(e),
+        })
+      })
+  }
+
+  const handleFindRelated = () => {
+    relatedRequestRef.current += 1
+
+    const content = extractPageContent()
+    const redditSearchSubreddit = getSubredditFromUrl(window.location.href)
+    const relatedQuery = buildRelatedResultsQuery(content.title, redditSearchSubreddit)
+    const redditSearchQuery = buildRedditSearchQuery(content.title)
+    const currentPostUrl = window.location.href
+    const requestId = relatedRequestRef.current
+    const exaEnabled = Boolean(settings?.exaEnabled)
+    const redditEnabled = settings?.redditSearchEnabled !== false
+
+    setRelatedResults(EMPTY_RELATED_RESULTS)
+    setRedditSearch(EMPTY_REDDIT_SEARCH)
+
+    if (!exaEnabled && !redditEnabled) return
+
+    if (exaEnabled) {
+      setRelatedResults({ phase: "loading", query: relatedQuery, searchType: settings?.exaSearchType, results: [] })
+      searchRelatedResults(relatedQuery)
+        .then((data) => {
+          if (relatedRequestRef.current !== requestId) return
+          setRelatedResults({
+            phase: "done",
+            query: data.query,
+            searchType: data.searchType,
+            results: data.results,
+            searchTime: data.searchTime,
+          })
+        })
+        .catch((e) => {
+          if (relatedRequestRef.current !== requestId) return
+          setRelatedResults({
+            phase: "error",
+            query: relatedQuery,
+            searchType: settings?.exaSearchType,
+            results: [],
+            errorMessage: e instanceof Error ? e.message : String(e),
+          })
+        })
+    }
+
+    if (redditEnabled) {
+      runRedditSearch(redditSearchQuery, redditSearchSubreddit, currentPostUrl, redditSearchSort)
+    }
+  }
+
+  const handleRedditSearchSortChange = (sort: RedditSearchSort) => {
+    setRedditSearchSort(sort)
+    const query = redditSearch.query ?? buildRedditSearchQuery(extractPageContent().title)
+    const subreddit = redditSearch.subreddit ?? getSubredditFromUrl(window.location.href)
+    runRedditSearch(query, subreddit, window.location.href, sort)
+  }
+
   const handleStop = () => {
     cancelRef.current?.()
     cancelRef.current = null
@@ -274,15 +410,20 @@ function RedditSummarizer() {
   const handleClose = () => {
     cancelRef.current?.()
     cancelRef.current = null
+    relatedRequestRef.current += 1
+    redditRequestRef.current += 1
+    setRelatedResults(EMPTY_RELATED_RESULTS)
+    setRedditSearch(EMPTY_REDDIT_SEARCH)
     setPhase("idle")
   }
 
-  if (!onPostPage) return null
+  if (!onPostPage || !enabled) return null
 
   const showNanoWarning = provider === "gemini-nano" && !nanoAvailable
   const currentDef = providerMap[provider]
   const currentApiKey = settings?.configs?.[provider]?.apiKey ?? ""
   const apiKeyMissing = !!(currentDef?.requiresApiKey && !currentApiKey)
+  const showPanel = phase !== "idle" || relatedResults.phase !== "idle" || redditSearch.phase !== "idle"
 
   return (
     <div className="rds-root">
@@ -298,7 +439,7 @@ function RedditSummarizer() {
         style={styleKey}
         provider={provider}
         model={model}
-        providers={allProviders}
+        providers={selectableProviders}
         availableModels={availableModels}
         modelsLoading={modelsLoading}
         apiKeyMissing={apiKeyMissing}
@@ -306,9 +447,10 @@ function RedditSummarizer() {
         onProviderChange={handleProviderChange}
         onModelChange={handleModelChange}
         onAnalyze={handleAnalyze}
+        onFindRelated={handleFindRelated}
         onStop={handleStop}
       />
-      {phase !== "idle" && (
+      {showPanel && (
         <SummaryPanel
           phase={phase}
           rawText={rawText}
@@ -318,6 +460,10 @@ function RedditSummarizer() {
           modelReady={modelReady}
           providerLabel={currentDef?.label}
           usageData={usageData}
+          relatedResults={relatedResults}
+          redditSearch={redditSearch}
+          redditSearchSort={redditSearchSort}
+          onRedditSearchSortChange={handleRedditSearchSortChange}
           onClose={handleClose}
         />
       )}

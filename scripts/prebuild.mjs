@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Downloads models.dev/api.json once at build time.
 // Writes bundled data to src/lib/models-dev-data.json.
-// Patches manifest.optional_host_permissions in package.json.
+// Patches manifest host permissions in package.json.
 
 import { readFileSync, writeFileSync } from "fs"
 import { resolve, dirname } from "path"
@@ -68,8 +68,8 @@ console.log(`Found ${sorted.length} origins`)
 // Patch package.json
 const pkg = JSON.parse(readFileSync(PKG_PATH, "utf8"))
 pkg.manifest = pkg.manifest ?? {}
-const fixed = ["https://*.reddit.com/*", "http://localhost/*", "http://127.0.0.1/*"]
+const fixed = ["https://*.reddit.com/*", "https://api.exa.ai/*", "http://localhost/*", "http://127.0.0.1/*"]
 pkg.manifest.host_permissions = [...fixed, ...sorted]
-delete pkg.manifest.optional_host_permissions
+pkg.manifest.optional_host_permissions = ["http://*/*", "https://*/*"]
 writeFileSync(PKG_PATH, JSON.stringify(pkg, null, 2) + "\n")
 console.log(`Patched package.json host_permissions (${pkg.manifest.host_permissions.length} total)`)

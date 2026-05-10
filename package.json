@@ -31,6 +31,7 @@
     ],
     "host_permissions": [
       "https://*.reddit.com/*",
+      "https://api.exa.ai/*",
       "http://localhost/*",
       "http://127.0.0.1/*",
       "https://ai-gateway.helicone.ai/*",
@@ -122,6 +123,10 @@
       "https://token-plan-sgp.xiaomimimo.com/*",
       "https://tokenhub.tencentmaas.com/*",
       "https://zenmux.ai/*"
+    ],
+    "optional_host_permissions": [
+      "http://*/*",
+      "https://*/*"
     ]
   },
   "pnpm": {
